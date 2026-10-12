@@ -4,7 +4,7 @@
     "use strict";
     const codec = QOL_REMOTE_CODEC, query = new URLSearchParams(location.search);
     const session = query.get("s"), lane = Number(query.get("lane")), lanes = Number(query.get("lanes"));
-    let meta, packed, index, sequence = 0, waiting = -1, retry = null, ended = false;
+    let meta, packed, index, sequence = 0, waiting = -1, retry = null, ended = false, frameCache = null, progressAt = -Infinity;
     const sourceAbort = typeof AbortController === "function" ? new AbortController() : null;
     function send(frame) {
         const title = "QOL_CODE:" + JSON.stringify({ s: session, lane, q: ++sequence, ...frame });
@@ -13,8 +13,9 @@
     }
     function emit() {
         if (ended) return;
-        if (waiting === -1) send({ kind: "manifest", meta });
-        else send({ kind: "chunk", index: waiting, data: codec.base64(packed.subarray(waiting * codec.CHUNK_BYTES, (waiting + 1) * codec.CHUNK_BYTES)) });
+        if (!frameCache) frameCache = waiting === -1 ? { kind: "manifest", meta }
+            : { kind: "chunk", index: waiting, data: codec.base64(packed.subarray(waiting * codec.CHUNK_BYTES, (waiting + 1) * codec.CHUNK_BYTES)) };
+        send(frameCache);
     }
     function finish() { ended = true; sourceAbort?.abort(); if (retry !== null) clearInterval(retry); retry = null; packed = null; }
     function acknowledge() {
@@ -25,6 +26,7 @@
         index = waiting === -1 ? lane : waiting + lanes;
         if (index >= meta.chunks) { finish(); return; }
         waiting = index;
+        frameCache = null;
         emit();
     }
     window.addEventListener("hashchange", acknowledge);
@@ -39,7 +41,10 @@
         const key = layout ? codec.checksum(Array.from(layout, c => c.charCodeAt(0))) : null;
         if (typeof QOL_GITHUB_SOURCE !== "undefined") {
             const snapshot = await QOL_GITHUB_SOURCE.load({ revision, layout, signal: sourceAbort?.signal,
-                onProgress: detail => { if (!ended) send({ kind: "progress", ...detail }); } });
+                onProgress: detail => {
+                    if (ended || Date.now() - progressAt < 250) return;
+                    progressAt = Date.now(); send({ kind: "progress", ...detail });
+                } });
             if (ended) return;
             const raw = new TextEncoder().encode(JSON.stringify(snapshot));
             packed = codec.pack(raw);
